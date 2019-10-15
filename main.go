@@ -5,12 +5,15 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	. "github.com/blockchain/data"
@@ -23,11 +26,14 @@ import (
 // https://medium.com/@mycoralhealth/code-your-own-blockchain-in-less-than-200-lines-of-go-e296282bcffc
 // Thanks for this tutorial
 
+const difficulty = 1
+
 var Blockchain []Block
 var bcServer chan []Block
+var mutex = &sync.Mutex{}
 
 func calculateHash(block Block) string {
-	record := string(block.Index) + block.Timestamp + string(block.BPM) + block.PrevHash
+	record := string(block.Index) + block.Timestamp + string(block.BPM) + block.PrevHash + block.Nonce
 	h := sha256.New()
 	h.Write([]byte(record))
 	hashed := h.Sum(nil)
@@ -44,7 +50,24 @@ func generateBlock(oldBlock Block, BPM int) (Block, error) {
 	newBlock.Timestamp = t.String()
 	newBlock.BPM = BPM
 	newBlock.PrevHash = oldBlock.Hash
-	newBlock.Hash = calculateHash(newBlock)
+	newBlock.Difficulty = difficulty
+
+	for i := 0; ; i++ {
+		hex := fmt.Sprintf("%x", i)
+		newBlock.Nonce = hex
+		newHash := calculateHash(newBlock)
+		if !isHashValid(newHash, newBlock.Difficulty) {
+			fmt.Println(newHash, " do more work!")
+			time.Sleep(time.Second)
+			continue
+		} else {
+			fmt.Println(newHash, " work done!")
+			newBlock.Hash = newHash
+			break
+		}
+	}
+
+	// newBlock.Hash = calculateHash(newBlock)
 
 	return newBlock, nil
 }
@@ -69,6 +92,11 @@ func replaceChain(newBlocks []Block) {
 	if len(newBlocks) > len(Blockchain) {
 		Blockchain = newBlocks
 	}
+}
+
+func isHashValid(hash string, difficulty int) bool {
+	prefix := strings.Repeat("0", difficulty)
+	return strings.HasPrefix(hash, prefix)
 }
 
 func makeMuxRouter() http.Handler {
@@ -152,7 +180,8 @@ func main() {
 
 	// create genesis block
 	t := time.Now()
-	genesisBlock := Block{0, t.String(), 0, "", ""}
+	genesisBlock := Block{}
+	genesisBlock = Block{0, t.String(), 0, calculateHash(genesisBlock), "", difficulty, ""}
 	spew.Dump(genesisBlock)
 	Blockchain = append(Blockchain, genesisBlock)
 
@@ -192,7 +221,12 @@ func handleConn(conn net.Conn) {
 				log.Printf("%v not a number: %v", scanner.Text(), err)
 				continue
 			}
+
+			//ensure atomicity when creating new block
+			mutex.Lock()
 			newBlock, err := generateBlock(Blockchain[len(Blockchain)-1], bpm)
+			mutex.Unlock()
+
 			if err != nil {
 				log.Println(err)
 				continue
